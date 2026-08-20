@@ -1,170 +1,81 @@
-# Embassy
+# Embassy nRF HAL
 
-Embassy is the next-generation framework for embedded applications. Write safe, correct, and energy-efficient embedded code faster, using the Rust programming language, its async facilities, and the Embassy libraries.
+HALs implement safe, idiomatic Rust APIs to use the hardware capabilities, so raw register manipulation is not needed.
 
-## [Documentation](https://embassy.dev/book/index.html) - [API reference](https://docs.embassy.dev/) - [Website](https://embassy.dev/) - [Chat](https://matrix.to/#/#embassy-rs:matrix.org)
+The Embassy nRF HAL targets the Nordic Semiconductor nRF family of hardware. The HAL implements both blocking and async APIs
+for many peripherals. The benefit of using the async APIs is that the HAL takes care of waiting for peripherals to
+complete operations in low power mode and handling interrupts, so that applications can focus on more important matters.
 
-## Rust + async ❤️ embedded
+NOTE: The Embassy HALs can be used both for non-async and async operations. For async, you can choose which runtime you want to use.
 
-The Rust programming language is blazingly fast and memory-efficient, with no runtime, garbage collector, or OS. It catches a wide variety of bugs at compile time, thanks to its full memory- and thread-safety, and expressive type system.
+For a complete list of available peripherals and features, see the [embassy-nrf documentation](https://docs.embassy.dev/embassy-nrf).
 
-Rust's [async/await](https://rust-lang.github.io/async-book/) allows for unprecedentedly easy and efficient multitasking in embedded systems. Tasks get transformed at compile time into state machines that get run cooperatively. It requires no dynamic memory allocation and runs on a single stack, so no per-task stack size tuning is required. It obsoletes the need for a traditional RTOS with kernel context switching, and is [faster and smaller than one!](https://tweedegolf.nl/en/blog/65/async-rust-vs-rtos-showdown)
+## Hardware support
 
-## Batteries included
+The `embassy-nrf` HAL supports most variants of the nRF family:
 
-- **Hardware Abstraction Layers**
-    - HALs implement safe, idiomatic Rust APIs to use the hardware capabilities, so raw register manipulation is not needed. The Embassy project maintains HALs for select hardware, but you can still use HALs from other projects with Embassy.
-    - [embassy-stm32](https://docs.embassy.dev/embassy-stm32/), for all STM32 microcontroller families.
-    - [embassy-nrf](https://docs.embassy.dev/embassy-nrf/), for the Nordic Semiconductor nRF52, nRF53, nRF54 and nRF91 series.
-    - [embassy-rp](https://docs.embassy.dev/embassy-rp/), for the Raspberry Pi RP2040 and RP23xx microcontrollers.
-    - [embassy-mspm0](https://docs.embassy.dev/embassy-mspm0/), for the Texas Instruments MSPM0 microcontrollers.
-    - [embassy-mcxa](https://docs.embassy.dev/embassy-mcxa/), for NXP's MCX-A series of microcontrollers.
-    - [esp-rs](https://github.com/esp-rs), for the Espressif Systems ESP32 series of chips.
-        - Embassy HAL support for Espressif chips, as well as Async Wi-Fi, Bluetooth, and ESP-NOW, is being developed in the [esp-rs/esp-hal](https://github.com/esp-rs/esp-hal) repository.
-    - [ch32-hal](https://github.com/ch32-rs/ch32-hal), for the WCH 32-bit RISC-V(CH32V) series of chips.
-    - [mpfs-hal](https://github.com/AlexCharlton/mpfs-hal), for the Microchip PolarFire SoC.
-    - [py32-hal](https://github.com/py32-rs/py32-hal), for the Puya Semiconductor PY32 series of microcontrollers.
-    - [ra-hal](https://git.sr.ht/~az1/ra-hal), for the Renesas RA family of microcontrollers.
+* nRF51 ([examples](https://github.com/embassy-rs/embassy/tree/main/examples/nrf51))
+* nRF52 ([examples](https://github.com/embassy-rs/embassy/tree/main/examples/nrf52840))
+* nRF53 ([examples](https://github.com/embassy-rs/embassy/tree/main/examples/nrf5340))
+* nRF54 ([examples](https://github.com/embassy-rs/embassy/tree/main/examples/nrf54l15))
+* nRF91 ([examples](https://github.com/embassy-rs/embassy/tree/main/examples/nrf9160))
 
-- **Time that Just Works** -
-  No more messing with hardware timers. [embassy_time](https://docs.embassy.dev/embassy-time) provides Instant, Duration, and Timer types that are globally available and never overflow.
+Most peripherals are supported, but can vary between chip families. To check what's available, make sure to pick the MCU you're targeting in the top menu in the [documentation](https://docs.embassy.dev/embassy-nrf).
 
-- **Real-time ready** -
-  Tasks on the same async executor run cooperatively, but you can create multiple executors with different priorities so that higher priority tasks preempt lower priority ones. See the [example](https://github.com/embassy-rs/embassy/blob/main/examples/nrf52840/src/bin/multiprio.rs).
+For MCUs with TrustZone support, both Secure (S) and Non-Secure (NS) modes are supported. Running in Secure mode
+allows running Rust code without a SPM or TF-M binary, saving flash space and simplifying development.
 
-- **Low-power ready** -
-  Easily build devices with years of battery life. The async executor automatically puts the core to sleep when there's no work to do. Tasks are woken by interrupts, there is no busy-loop polling while waiting.
+## Time driver
 
-- **Networking** -
-  The [embassy-net](https://docs.embassy.dev/embassy-net/) network stack implements extensive networking functionality, including Ethernet, IP, TCP, UDP, ICMP, and DHCP. Async drastically simplifies managing timeouts and serving multiple connections concurrently.
+If the `time-driver-rtc1` feature is enabled, the HAL uses the RTC peripheral as a global time driver for [embassy-time](https://crates.io/crates/embassy-time), with a tick rate of 32768 Hz.
 
-- **Bluetooth**
-    - The [trouble](https://github.com/embassy-rs/trouble) crate provides a Bluetooth Low Energy 4.x and 5.x Host that runs on any microcontroller implementing the [bt-hci](https://github.com/embassy-rs/bt-hci) traits (currently
-      `nRF52`, `nrf54`, `rp2040`, `rp23xx` and `esp32` and `serial` controllers are supported).
-    - The [nrf-softdevice](https://github.com/embassy-rs/nrf-softdevice) crate provides Bluetooth Low Energy 4.x and 5.x support for nRF52 microcontrollers.
-    - The [embassy-stm32-wpan](https://github.com/embassy-rs/embassy/tree/main/embassy-stm32-wpan) crate provides Bluetooth Low Energy 5.x support for stm32wb microcontrollers.
+## Embassy-net-driver
 
-- **LoRa** -
-  The [lora-rs](https://github.com/lora-rs/lora-rs) project provides an async LoRa and LoRaWAN stack that works well on Embassy.
+If the board supports IEEE 802.15.4 (see `src/radio/mod.rs`) the corresponding [embassy-net-driver](https://crates.io/crates/embassy-net-driver) implementation can be enabled with the feature `net-driver`.
 
-- **USB** -
-  [embassy-usb](https://docs.embassy.dev/embassy-usb/) implements a device-side USB stack. Implementations for common classes such as USB serial (CDC ACM) and USB HID are available, and a rich builder API allows building your own.
+## Embedded-hal
 
-- **Bootloader and DFU** -
-  [embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot) is a lightweight bootloader supporting firmware application upgrades in a power-fail-safe way, with trial boots and rollbacks.
+The `embassy-nrf` HAL implements the traits from [embedded-hal](https://crates.io/crates/embedded-hal) (v0.2 and 1.0) and [embedded-hal-async](https://crates.io/crates/embedded-hal-async), as well as [embedded-io](https://crates.io/crates/embedded-io) and [embedded-io-async](https://crates.io/crates/embedded-io-async).
 
-## Sneak peek
+## Interoperability
+
+This crate can run on any executor.
+
+Optionally, some features requiring [`embassy-time`](https://crates.io/crates/embassy-time) can be activated with the `time` feature. If you enable it,
+you must link an `embassy-time` driver in your project.
+
+## EasyDMA considerations
+
+On nRF chips, peripherals can use the so called EasyDMA feature to offload the task of interacting
+with peripherals. It takes care of sending/receiving data over a variety of bus protocols (TWI/I2C, UART, SPI).
+However, EasyDMA requires the buffers used to transmit and receive data to reside in RAM. Unfortunately, Rust
+slices will not always do so. The following example using the SPI peripheral shows a common situation where this might happen:
 
 ```rust,ignore
-use defmt::info;
-use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
-use embassy_nrf::gpio::{AnyPin, Input, Level, Output, OutputDrive, Pin, Pull};
-use embassy_nrf::{Peri, Peripherals};
+// As we pass a slice to the function whose contents will not ever change,
+// the compiler writes it into the flash and thus the pointer to it will
+// reference static memory. Since EasyDMA requires slices to reside in RAM,
+// this function call will fail.
+let result = spim.write_from_ram(&[1, 2, 3]);
+assert_eq!(result, Err(Error::BufferNotInRAM));
 
-// Declare async tasks
-#[embassy_executor::task]
-async fn blink(pin: Peri<'static, AnyPin>) {
-    let mut led = Output::new(pin, Level::Low, OutputDrive::Standard);
-
-    loop {
-        // Timekeeping is globally available, no need to mess with hardware timers.
-        led.set_high();
-        Timer::after_millis(150).await;
-        led.set_low();
-        Timer::after_millis(150).await;
-    }
-}
-
-// Main is itself an async task as well.
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init(Default::default());
-
-    // Spawned tasks run in the background, concurrently.
-    spawner.spawn(blink(p.P0_13.into()).unwrap());
-
-    let mut button = Input::new(p.P0_11, Pull::Up);
-    loop {
-        // Asynchronously wait for GPIO events, allowing other tasks
-        // to run, or the core to sleep.
-        button.wait_for_low().await;
-        info!("Button pressed!");
-        button.wait_for_high().await;
-        info!("Button released!");
-    }
-}
+// The data is still static and located in flash. However, since we are assigning
+// it to a variable, the compiler will load it into memory. Passing a reference to the
+// variable will yield a pointer that references dynamic memory, thus making EasyDMA happy.
+// This function call succeeds.
+let data = [1, 2, 3];
+let result = spim.write_from_ram(&data);
+assert!(result.is_ok());
 ```
 
-## Examples
+Each peripheral struct which uses EasyDMA ([`Spim`](spim::Spim), [`Uarte`](uarte::Uarte), [`Twim`](twim::Twim)) has two variants of their mutating functions:
+- Functions with the suffix (e.g. [`write_from_ram`](spim::Spim::write_from_ram), [`transfer_from_ram`](spim::Spim::transfer_from_ram)) will return an error if the passed slice does not reside in RAM.
+- Functions without the suffix (e.g. [`write`](spim::Spim::write), [`transfer`](spim::Spim::transfer)) will check whether the data is in RAM and copy it into memory prior to transmission.
 
-Examples are found in the
-`examples/` folder separated by the chip manufacturer they are designed to run on. For example:
+Since copying incurs a overhead, you are given the option to choose from `_from_ram` variants which will
+fail and notify you, or the more convenient versions without the suffix which are potentially a little bit
+more inefficient. Be aware that this overhead is not only in terms of instruction count but also in terms of memory usage
+as the methods without the suffix will be allocating a statically sized buffer (up to 512 bytes for the nRF52840).
 
-* `examples/nrf52840` run on the
-  `nrf52840-dk` board (PCA10056) but should be easily adaptable to other nRF52 chips and boards.
-* `examples/nrf5340` run on the `nrf5340-dk` board (PCA10095).
-* `examples/stm32xx` for the various STM32 families.
-* `examples/rp` are for the RP2040 and RP235x chips.
-* `examples/mcxa` run on the `FRDM-MCXA266` board.
-* `examples/std` are designed to run locally on your PC.
-
-### Running examples
-
-- Install `probe-rs` following the instructions at <https://probe.rs>.
-- Change directory to the sample's base directory. For example:
-
-```bash
-cd examples/nrf52840
-```
-
-- Ensure `Cargo.toml` sets the right feature for the name of the chip you are programming.
-  If this name is incorrect, the example may fail to run or immediately crash
-  after being programmed.
-
-- Ensure `.cargo/config.toml` contains the name of the chip you are programming.
-
-- Run the example
-
-For example:
-
-```bash
-cargo run --release --bin blinky
-```
-
-For more help getting started, see [Getting Started][1] and [Running the Examples][2].
-
-## Developing Embassy with Rust Analyzer-based editors
-
-The [Rust Analyzer](https://rust-analyzer.github.io/) is used by [Visual Studio Code](https://code.visualstudio.com/)
-and others. Given the multiple targets that Embassy serves, there is no Cargo workspace file. Instead, the Rust Analyzer
-must be told of the target project to work with. In the case of Visual Studio Code,
-please refer to the `.vscode/settings.json` file's `rust-analyzer.linkedProjects`setting.
-
-## Minimum supported Rust version (MSRV)
-
-Embassy is guaranteed to compile on latest stable Rust. It *might*
-compile with older versions, but that may change in any new patch release.
-
-## Why the name?
-
-EMBedded ASYnc! :)
-
-## License
-
-Embassy is licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
-
-at your option.
-
-## Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
-
-[1]: https://embassy-rs.github.io/embassy-book/embassy/dev/getting_started.html
-[2]: https://github.com/embassy-rs/embassy/wiki/Running-the-Examples
+Note that the methods that read data like [`read`](spim::Spim::read) and [`transfer_in_place`](spim::Spim::transfer_in_place) do not have the corresponding `_from_ram` variants as
+mutable slices always reside in RAM.
