@@ -340,6 +340,8 @@ impl<'d> InputChannel<'d> {
                 crate::gpio::Port::Port0 => 0,
                 crate::gpio::Port::Port1 => 1,
                 crate::gpio::Port::Port2 => 2,
+                #[cfg(feature = "_gpio-p3")]
+                crate::gpio::Port::Port3 => 3,
             });
             w.set_psel(pin.pin.pin.pin());
         });
@@ -517,6 +519,8 @@ impl<'d> OutputChannel<'d> {
                 crate::gpio::Port::Port0 => 0,
                 crate::gpio::Port::Port1 => 1,
                 crate::gpio::Port::Port2 => 2,
+                #[cfg(feature = "_gpio-p3")]
+                crate::gpio::Port::Port3 => 3,
             });
             w.set_psel(pin.pin.pin.pin());
         });
