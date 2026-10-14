@@ -40,6 +40,7 @@ pub(crate) struct State {
 
     rx_buf: RingBuffer,
     rx_started: AtomicBool,
+    rx_overrun: AtomicBool,
 }
 
 /// UART error.
@@ -47,12 +48,15 @@ pub(crate) struct State {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Error {
-    // No errors for now
+    /// Bytes arrived faster than the driver could take them, and some were lost.
+    Overrun,
 }
 
 impl core::fmt::Display for Error {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Error::Overrun => write!(f, "Buffer Overrun"),
+        }
     }
 }
 
@@ -66,6 +70,7 @@ impl State {
 
             rx_buf: RingBuffer::new(),
             rx_started: AtomicBool::new(false),
+            rx_overrun: AtomicBool::new(false),
         }
     }
 }
@@ -91,7 +96,8 @@ impl<U: UarteInstance> interrupt::typelevel::Handler<U::Interrupt> for Interrupt
                 r.errorsrc().write_value(errs);
 
                 if errs.overrun() {
-                    panic!("BufferedUarte UART overrun");
+                    s.rx_overrun.store(true, Ordering::Release);
+                    ss.rx_waker.wake();
                 }
             }
 
@@ -559,6 +565,9 @@ impl<'d, U: UarteInstance> BufferedUarteRx<'d, U> {
 
             let s = U::buffered_state();
             let ss = U::state();
+            if s.rx_overrun.swap(false, Ordering::Acquire) {
+                return Poll::Ready(Err(Error::Overrun));
+            }
             let mut rx = unsafe { s.rx_buf.reader() };
 
             let (ptr, n) = rx.pop_buf();
@@ -586,6 +595,9 @@ impl<'d, U: UarteInstance> BufferedUarteRx<'d, U> {
     /// we are ready to read if there is data in the buffer
     fn read_ready() -> Result<bool, Error> {
         let state = U::buffered_state();
+        if state.rx_overrun.swap(false, Ordering::Acquire) {
+            return Err(Error::Overrun);
+        }
         Ok(!state.rx_buf.is_empty())
     }
 }
@@ -612,7 +624,9 @@ mod _embedded_io {
 
     impl embedded_io_async::Error for Error {
         fn kind(&self) -> embedded_io_async::ErrorKind {
-            match *self {}
+            match *self {
+                Error::Overrun => embedded_io_async::ErrorKind::OutOfMemory,
+            }
         }
     }
 
