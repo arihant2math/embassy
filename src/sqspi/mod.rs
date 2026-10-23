@@ -19,6 +19,10 @@
 //! - `ram`: a RAM buffer the firmware code, its working RAM, and the virtual
 //!   register block are placed into.
 //!
+//! Buffers need no particular alignment. The firmware DMAs to and from
+//! word-aligned addresses only (an sQSPI 1.2.1 limitation), so the driver
+//! stages unaligned ones through a small buffer of its own.
+//!
 //! # Example
 //! ```ignore
 //! use embassy_nrf::sqspi::{self, Config};
@@ -57,6 +61,14 @@ use crate::gpio::{Pin as GpioPin, SealedPin};
 use crate::interrupt::typelevel::Interrupt;
 use crate::pac::gpio::vals as gpiovals;
 use crate::{interrupt, pac};
+
+/// Size of the driver's word-aligned buffer for unaligned caller buffers.
+const BOUNCE_SIZE: usize = 256;
+/// Longest single transfer. The length goes into a 16-bit register.
+const MAX_TRANSFER: usize = 0x8000;
+
+#[repr(C, align(4))]
+struct Bounce([u8; BOUNCE_SIZE]);
 
 /// Expected sQSPI soft peripheral ID in the firmware metadata header.
 const SOFTPERIPHERAL_ID_SQSPI: u16 = 0x45b1;
@@ -286,6 +298,9 @@ pub enum Error {
     Transfer,
     /// The VPR coprocessor could not be started.
     Vpr,
+    /// An erase range off sector boundaries, or an unaligned custom
+    /// instruction buffer longer than the driver's bounce buffer.
+    Unaligned,
 }
 
 impl From<crate::vpr::Error> for Error {
@@ -329,6 +344,7 @@ pub struct Sqspi<'d> {
     state: &'static State,
     config: Config,
     task_count: u32,
+    bounce: Bounce,
     _phantom: PhantomData<&'d ()>,
 }
 
@@ -423,6 +439,7 @@ impl<'d> Sqspi<'d> {
             state,
             config,
             task_count: 1,
+            bounce: Bounce([0; BOUNCE_SIZE]),
             _phantom: PhantomData,
         };
         this.asb();
@@ -597,10 +614,11 @@ impl<'d> Sqspi<'d> {
 
     async fn wait_wip(&mut self) -> Result<(), Error> {
         loop {
-            let mut status = [0u8; 1];
-            self.start(0x05, 0, 0, 0, status.as_mut_ptr() as u32, 1, Dir::Rx, Lines::Single);
+            // The firmware needs a word-aligned buffer, even for one byte.
+            let mut status = 0u32;
+            self.start(0x05, 0, 0, 0, &raw mut status as u32, 1, Dir::Rx, Lines::Single);
             self.wait_done().await?;
-            if status[0] & 0x01 == 0 {
+            if status & 0x01 == 0 {
                 return Ok(());
             }
         }
@@ -613,10 +631,11 @@ impl<'d> Sqspi<'d> {
 
     fn blocking_wait_wip(&mut self) -> Result<(), Error> {
         loop {
-            let mut status = [0u8; 1];
-            self.start(0x05, 0, 0, 0, status.as_mut_ptr() as u32, 1, Dir::Rx, Lines::Single);
+            // The firmware needs a word-aligned buffer, even for one byte.
+            let mut status = 0u32;
+            self.start(0x05, 0, 0, 0, &raw mut status as u32, 1, Dir::Rx, Lines::Single);
             self.blocking_wait_done()?;
-            if status[0] & 0x01 == 0 {
+            if status & 0x01 == 0 {
                 return Ok(());
             }
         }
@@ -630,43 +649,52 @@ impl<'d> Sqspi<'d> {
     /// reads into it; otherwise `req` is transmitted.
     pub async fn custom_instruction(&mut self, opcode: u8, req: &[u8], resp: &mut [u8]) -> Result<(), Error> {
         self.write_enable().await?;
-        if !resp.is_empty() {
-            self.start(
-                opcode,
-                0,
-                0,
-                0,
-                resp.as_mut_ptr() as u32,
-                resp.len(),
-                Dir::Rx,
-                Lines::Single,
-            );
-        } else {
-            self.start(opcode, 0, 0, 0, req.as_ptr() as u32, req.len(), Dir::Tx, Lines::Single);
-        }
+        let bounced = self.start_custom(opcode, req, resp)?;
         self.wait_done().await?;
+        self.finish_custom(bounced, resp);
         self.wait_wip().await
     }
 
     /// Do a custom SPI instruction, blocking version.
     pub fn blocking_custom_instruction(&mut self, opcode: u8, req: &[u8], resp: &mut [u8]) -> Result<(), Error> {
         self.blocking_write_enable()?;
-        if !resp.is_empty() {
-            self.start(
-                opcode,
-                0,
-                0,
-                0,
-                resp.as_mut_ptr() as u32,
-                resp.len(),
-                Dir::Rx,
-                Lines::Single,
-            );
-        } else {
-            self.start(opcode, 0, 0, 0, req.as_ptr() as u32, req.len(), Dir::Tx, Lines::Single);
-        }
+        let bounced = self.start_custom(opcode, req, resp)?;
         self.blocking_wait_done()?;
+        self.finish_custom(bounced, resp);
         self.blocking_wait_wip()
+    }
+
+    /// Starts a custom instruction reading into `resp`, or else sending
+    /// `req`, through the bounce buffer if it's unaligned. Returns whether it
+    /// was bounced.
+    fn start_custom(&mut self, opcode: u8, req: &[u8], resp: &mut [u8]) -> Result<bool, Error> {
+        let rx = !resp.is_empty();
+        let (ptr, len) = if rx {
+            (resp.as_mut_ptr() as usize, resp.len())
+        } else {
+            (req.as_ptr() as usize, req.len())
+        };
+        let bounced = ptr % 4 != 0;
+        let ptr = if bounced {
+            if len > BOUNCE_SIZE {
+                return Err(Error::Unaligned);
+            }
+            if !rx {
+                self.bounce.0[..len].copy_from_slice(req);
+            }
+            self.bounce.0.as_mut_ptr() as usize
+        } else {
+            ptr
+        };
+        let dir = if rx { Dir::Rx } else { Dir::Tx };
+        self.start(opcode, 0, 0, 0, ptr as u32, len, dir, Lines::Single);
+        Ok(bounced)
+    }
+
+    fn finish_custom(&self, bounced: bool, resp: &mut [u8]) {
+        if bounced {
+            resp.copy_from_slice(&self.bounce.0[..resp.len()]);
+        }
     }
 
     /// Send a single bare opcode (no address, no data) on a single line,
@@ -682,75 +710,91 @@ impl<'d> Sqspi<'d> {
     }
 
     /// Raw read: no bounds check against the configured capacity.
-    pub async fn read_raw(&mut self, address: u32, data: &mut [u8]) -> Result<(), Error> {
-        if data.is_empty() {
-            return Ok(());
+    pub async fn read_raw(&mut self, mut address: u32, mut data: &mut [u8]) -> Result<(), Error> {
+        while !data.is_empty() {
+            let (n, bounced) = self.start_read(address, data);
+            self.wait_done().await?;
+            data = self.finish_read(data, n, bounced);
+            address += n as u32;
         }
-        let (op, addr_bits, dummy, lines) = self.read_params();
-        self.start(
-            op,
-            address,
-            addr_bits,
-            dummy,
-            data.as_mut_ptr() as u32,
-            data.len(),
-            Dir::Rx,
-            lines,
-        );
-        self.wait_done().await
+        Ok(())
     }
 
     /// Raw write: no bounds check against the configured capacity.
-    pub async fn write_raw(&mut self, address: u32, data: &[u8]) -> Result<(), Error> {
-        let mut addr = address;
-        let mut rest = data;
-        let (op, addr_bits, lines) = self.write_params();
-        while !rest.is_empty() {
-            let n = self.page_chunk(addr, rest.len());
+    pub async fn write_raw(&mut self, mut address: u32, mut data: &[u8]) -> Result<(), Error> {
+        while !data.is_empty() {
             self.write_enable().await?;
-            self.start(op, addr, addr_bits, 0, rest.as_ptr() as u32, n, Dir::Tx, lines);
+            let n = self.start_write(address, data);
             self.wait_done().await?;
             self.wait_wip().await?;
-            addr += n as u32;
-            rest = &rest[n..];
+            address += n as u32;
+            data = &data[n..];
         }
         Ok(())
     }
 
     /// Raw read, blocking version.
-    pub fn blocking_read_raw(&mut self, address: u32, data: &mut [u8]) -> Result<(), Error> {
-        if data.is_empty() {
-            return Ok(());
+    pub fn blocking_read_raw(&mut self, mut address: u32, mut data: &mut [u8]) -> Result<(), Error> {
+        while !data.is_empty() {
+            let (n, bounced) = self.start_read(address, data);
+            self.blocking_wait_done()?;
+            data = self.finish_read(data, n, bounced);
+            address += n as u32;
         }
-        let (op, addr_bits, dummy, lines) = self.read_params();
-        self.start(
-            op,
-            address,
-            addr_bits,
-            dummy,
-            data.as_mut_ptr() as u32,
-            data.len(),
-            Dir::Rx,
-            lines,
-        );
-        self.blocking_wait_done()
+        Ok(())
     }
 
     /// Raw write, blocking version.
-    pub fn blocking_write_raw(&mut self, address: u32, data: &[u8]) -> Result<(), Error> {
-        let mut addr = address;
-        let mut rest = data;
-        let (op, addr_bits, lines) = self.write_params();
-        while !rest.is_empty() {
-            let n = self.page_chunk(addr, rest.len());
+    pub fn blocking_write_raw(&mut self, mut address: u32, mut data: &[u8]) -> Result<(), Error> {
+        while !data.is_empty() {
             self.blocking_write_enable()?;
-            self.start(op, addr, addr_bits, 0, rest.as_ptr() as u32, n, Dir::Tx, lines);
+            let n = self.start_write(address, data);
             self.blocking_wait_done()?;
             self.blocking_wait_wip()?;
-            addr += n as u32;
-            rest = &rest[n..];
+            address += n as u32;
+            data = &data[n..];
         }
         Ok(())
+    }
+
+    /// Starts reading the next piece of `data` (non-empty), straight into
+    /// it if it's word-aligned, else into the bounce buffer. Returns the
+    /// piece's length and whether it was bounced.
+    fn start_read(&mut self, address: u32, data: &mut [u8]) -> (usize, bool) {
+        let (op, addr_bits, dummy, lines) = self.read_params();
+        let bounced = data.as_ptr() as usize % 4 != 0;
+        let (ptr, n) = if bounced {
+            (self.bounce.0.as_mut_ptr(), data.len().min(BOUNCE_SIZE))
+        } else {
+            (data.as_mut_ptr(), data.len().min(MAX_TRANSFER))
+        };
+        self.start(op, address, addr_bits, dummy, ptr as u32, n, Dir::Rx, lines);
+        (n, bounced)
+    }
+
+    /// Copies a bounced piece out, and returns the rest of `data`.
+    fn finish_read<'a>(&self, data: &'a mut [u8], n: usize, bounced: bool) -> &'a mut [u8] {
+        if bounced {
+            data[..n].copy_from_slice(&self.bounce.0[..n]);
+        }
+        &mut data[n..]
+    }
+
+    /// Starts programming the next piece of `data` (non-empty), never past
+    /// a page boundary, through the bounce buffer if `data` is unaligned.
+    /// Returns the piece's length.
+    fn start_write(&mut self, address: u32, data: &[u8]) -> usize {
+        let (op, addr_bits, lines) = self.write_params();
+        let mut n = self.page_chunk(address, data.len());
+        let ptr = if data.as_ptr() as usize % 4 != 0 {
+            n = n.min(BOUNCE_SIZE);
+            self.bounce.0[..n].copy_from_slice(&data[..n]);
+            self.bounce.0.as_ptr()
+        } else {
+            data.as_ptr()
+        };
+        self.start(op, address, addr_bits, 0, ptr as u32, n, Dir::Tx, lines);
+        n
     }
 
     /// Read from flash, bounds-checked against the configured capacity.
@@ -849,6 +893,18 @@ impl<'d> Sqspi<'d> {
         Ok(())
     }
 
+    /// Checks a `NorFlash::erase` range.
+    fn check_erase_range(&self, from: u32, to: u32) -> Result<(), Error> {
+        let sector = <Self as NorFlash>::ERASE_SIZE as u32;
+        if from > to || from % sector != 0 || to % sector != 0 {
+            return Err(Error::Unaligned);
+        }
+        if self.config.capacity != 0 && to > self.config.capacity {
+            return Err(Error::OutOfBounds);
+        }
+        Ok(())
+    }
+
     fn erase_bounds(&self, address: u32) -> Result<(), Error> {
         if self.config.capacity != 0 && address >= self.config.capacity {
             return Err(Error::OutOfBounds);
@@ -870,6 +926,7 @@ impl NorFlashError for Error {
     fn kind(&self) -> NorFlashErrorKind {
         match self {
             Error::OutOfBounds => NorFlashErrorKind::OutOfBounds,
+            Error::Unaligned => NorFlashErrorKind::NotAligned,
             _ => NorFlashErrorKind::Other,
         }
     }
@@ -880,7 +937,7 @@ impl<'d> ErrorType for Sqspi<'d> {
 }
 
 impl<'d> ReadNorFlash for Sqspi<'d> {
-    const READ_SIZE: usize = 4;
+    const READ_SIZE: usize = 1;
 
     fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
         self.blocking_read(offset, bytes)
@@ -892,10 +949,11 @@ impl<'d> ReadNorFlash for Sqspi<'d> {
 }
 
 impl<'d> NorFlash for Sqspi<'d> {
-    const WRITE_SIZE: usize = 4;
+    const WRITE_SIZE: usize = 1;
     const ERASE_SIZE: usize = 4096;
 
     fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        self.check_erase_range(from, to)?;
         for address in (from..to).step_by(<Self as NorFlash>::ERASE_SIZE) {
             self.blocking_erase(address)?;
         }
@@ -913,7 +971,7 @@ mod _eh1 {
     use super::*;
 
     impl<'d> AsyncReadNorFlash for Sqspi<'d> {
-        const READ_SIZE: usize = 4;
+        const READ_SIZE: usize = 1;
 
         async fn read(&mut self, address: u32, data: &mut [u8]) -> Result<(), Self::Error> {
             self.read(address, data).await
@@ -933,6 +991,7 @@ mod _eh1 {
         }
 
         async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+            self.check_erase_range(from, to)?;
             for address in (from..to).step_by(<Self as AsyncNorFlash>::ERASE_SIZE) {
                 self.erase(address).await?;
             }
