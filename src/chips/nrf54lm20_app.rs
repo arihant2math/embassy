@@ -205,9 +205,10 @@ pub mod pac {
 pub const EASY_DMA_SIZE: usize = (1 << 16) - 1;
 pub const FORCE_COPY_BUFFER_SIZE: usize = 1024;
 
-// 2 MB NVM
+// This chip module selects nrf-pac/nrf54lm20a-app. Nordic's LM20A MDK
+// defines usable RRAM as [0, 0x1fd000), not the nominal 2 MiB capacity.
 #[allow(unused)]
-pub const FLASH_SIZE: usize = 2048 * 1024;
+pub const FLASH_SIZE: usize = 0x1fd000;
 
 embassy_hal_internal::peripherals! {
     // USB
