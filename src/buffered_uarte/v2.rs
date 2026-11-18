@@ -522,6 +522,8 @@ impl<'d, U: UarteInstance> BufferedUarteRx<'d, U> {
         let rx_len = rx_buffer.len().min(EASY_DMA_SIZE * 2);
         let rx_ptr = rx_buffer.as_mut_ptr();
         unsafe { s.rx_buf.init(rx_ptr, rx_len) };
+        s.rx_started.store(false, Ordering::Relaxed);
+        s.rx_overrun.store(false, Ordering::Relaxed);
 
         // clear errors
         let errors = r.errorsrc().read();
@@ -606,13 +608,24 @@ impl<'a, U: UarteInstance> Drop for BufferedUarteRx<'a, U> {
     fn drop(&mut self) {
         let r = U::regs();
 
-        r.intenclr().write(|w| {
-            w.set_rxto(true);
-        });
-        r.events_rxto().write_value(0);
-
+        // Without a buffer, the interrupt handler no longer restarts RX.
         let s = U::buffered_state();
         unsafe { s.rx_buf.deinit() }
+
+        r.intenclr().write(|w| {
+            w.set_rxto(true);
+            w.set_dmarxend(true);
+            w.set_error(true);
+        });
+        // Once started, RX is restarted on every END, so a transfer is in
+        // progress or its END is pending. A running receiver keeps the
+        // high-frequency clock requested even after the UARTE is disabled.
+        if s.rx_started.load(Ordering::Relaxed) {
+            r.tasks_dma().rx().stop().write_value(1);
+            while r.events_dma().rx().end().read() == 0 {}
+        }
+        r.events_dma().rx().end().write_value(0);
+        r.events_rxto().write_value(0);
 
         let s = U::state();
         drop_tx_rx(r, s);
